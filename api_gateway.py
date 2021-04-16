@@ -6,13 +6,87 @@ from flask.json import jsonify
 from http import HTTPStatus
 from functools import wraps
 import jwt
+from requests.models import Response
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = '2b01ddd83c7b5778cb05d8f66d94c727'
-ACCOUNT_SERVICE_URL = 'http://localhost:5000'
+
+class Service:
+	total_services = 0
+
+	def __init__(self, name, address, port):
+		self.name = name
+		self.address = address
+		self.port = port
+		self.id = Service.total_services
+		Service.total_services += 1
+
+	@property
+	def url(self):
+		return f"http://{self.address}:{self.port}"
+
+class ServiceStatus:
+	def __init__(self):
+		self.last_time = 0
+		self.state = 'closed'
+		self.failed_attempts = 0
+
+class CircuitBreaker:
+
+	def __init__(self, timeout, fail_count):
+		self.services = {}
+		self.timeout = timeout
+		self.fail_count = fail_count
+
+	def send_request(self, service, func, url, *args, **kwargs):
+		if service.id in self.services:
+			stats = self.services[service.id]
+			if stats.state == 'open':
+				if datetime.datetime.now() - stats.last_time > datetime.timedelta(milliseconds=self.timeout):
+					stats.state = 'half-open'
+			if stats.state == 'open':
+				response = Response()
+				response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+				response._content = b"{'message': 'Service in cooldown'}"
+				response.headers['Content-Type'] = 'application/json'
+				return response
+		else:
+			stats = self.services[service.id] = ServiceStatus()
+		response = Response()
+		try:
+			stats.last_time = datetime.datetime.now()
+			response = func(service.url + url, timeout=0.5, *args, **kwargs)
+			if response.status_code in [500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 510, 598, 599]:
+				if stats.state == 'closed':
+					stats.failed_attempts += 1
+				else:
+					stats.state = 'open'
+			elif stats.state == 'half-open':
+				stats.failed_attempts = 0
+				stats.state = 'closed'
+
+		except Exception:
+			stats.failed_attempts += 1
+			response = Response()
+			response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+			response._content = b"{'message' : 'Service unavailable'}"
+			response.headers['Content-Type'] = 'application/json'
+
+
+		if stats.failed_attempts >= self.fail_count:
+			stats.state = 'open'
+			stats.last_time = datetime.datetime.now()
+
+		return response
+
+
+account_service = Service("Account Service", "localhost", 5000)
+circuit_breaker = CircuitBreaker(10000, 3)
+
 
 def as_response(response):
 	return response.content, response.status_code, response.headers.items()
+
 
 def token_required(func):
 	@wraps(func)
@@ -38,7 +112,7 @@ def signup():
 		return jsonify(message='Password is not given'), HTTPStatus.BAD_REQUEST
 
 	json['hashed_passwd'] = generate_password_hash(password)
-	response = requests.post(ACCOUNT_SERVICE_URL + "/create_user", json=json)
+	response = circuit_breaker.send_request(account_service, requests.post, "/create_user", json=json)
 	return as_response(response)
 
 
@@ -51,8 +125,8 @@ def login():
 		return jsonify(message="Username is not given"), HTTPStatus.BAD_REQUEST
 	if not password:
 		return jsonify(message="Password is not given"), HTTPStatus.BAD_REQUEST
-	ACCOUNT_GET_USER_URL = ACCOUNT_SERVICE_URL + f"/get_user/{username}"
-	response = requests.get(ACCOUNT_GET_USER_URL)
+	get_user_url = f"/get_user/{username}"
+	response = circuit_breaker.send_request(account_service, requests.get, get_user_url)
 	if response.status_code != HTTPStatus.OK:
 		return as_response(response)
 
@@ -70,8 +144,8 @@ def login():
 @app.route('/show_profile', methods=['GET'])
 @token_required
 def show_profile(username):
-	ACCOUNT_GET_USER_URL = ACCOUNT_SERVICE_URL + f"/get_user/{username}"
-	response = requests.get(ACCOUNT_GET_USER_URL)
+	get_user_url = f"/get_user/{username}"
+	response = circuit_breaker.send_request(account_service, requests.get, get_user_url)
 
 	if response.status_code != HTTPStatus.OK:
 		return as_response(response)
@@ -81,12 +155,13 @@ def show_profile(username):
 
 	return jsonify(user=found_user), HTTPStatus.OK
 
+
 @app.route('/update_profile', methods=['POST'])
 @token_required
 def update_profile(username):
-	ACCOUNT_MODIFY_USER_URL = ACCOUNT_SERVICE_URL + f"/modify_user/{username}"
+	modify_user_url = f"/modify_user/{username}"
 	json = request.json
-	response = requests.put(ACCOUNT_MODIFY_USER_URL, json=json)
+	response = circuit_breaker.send_request(account_service, requests.put, modify_user_url, json=json)
 	return as_response(response)
 
 

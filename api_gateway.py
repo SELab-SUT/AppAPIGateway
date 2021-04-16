@@ -95,7 +95,12 @@ def token_required(func):
 		if not token:
 			return jsonify(message="No token is given"), HTTPStatus.UNAUTHORIZED
 		try:
-			username = jwt.decode(token, app.config.get('SECRET_KEY'), algorithms='HS256')['sub']
+			payload = jwt.decode(token, app.config.get('SECRET_KEY'), algorithms='HS256')
+			username = payload['sub']
+			exp = datetime.datetime.fromtimestamp(payload['exp'])
+			if datetime.datetime.now() >= exp:
+				return jsonify(message="Token has expired."), HTTPStatus.UNAUTHORIZED
+
 		except Exception as e:
 			return jsonify(message=str(e)), HTTPStatus.UNAUTHORIZED
 		return func(username, *args, **kwargs)
@@ -131,10 +136,11 @@ def login():
 		return as_response(response)
 
 	found_user = response.json()['user']
+	expire_time = (datetime.datetime.now() + datetime.timedelta(days=1)).timestamp()
 	if check_password_hash(found_user['hashed_passwd'], password):
 		payload = {
 			'sub': username,
-			'exp': datetime.datetime.now() + datetime.timedelta(days=1)
+			'exp': expire_time
 		}
 		token = jwt.encode(payload, app.config.get('SECRET_KEY'), algorithm='HS256')
 		return jsonify(message="Login Successful", jwt=token), HTTPStatus.OK

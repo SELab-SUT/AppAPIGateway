@@ -80,8 +80,8 @@ class CircuitBreaker:
 		return response
 
 
-account_service = Service("Account Service", "localhost", 5000)
-book_service = Service("Book Service", "localhost", 1000)
+account_service = Service("Account Service", "account-service", 5000)
+book_service = Service("Book Service", "book-service", 1000)
 circuit_breaker = CircuitBreaker(10000, 3)
 
 
